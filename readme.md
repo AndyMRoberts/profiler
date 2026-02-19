@@ -1,6 +1,6 @@
 # Profiler
 
-Python package for recording power, CPU, GPU, and memory metrics during testing of ML models, SLAM systems, etc.
+A one-stop-shop for energy and memory linux profiling for use benchmarking ML, DL, and other sustems. Combines nvidia-ml-py, psutil, and pyjoules python package for recording CPU/GPU, power and usage, and memory metrics. With the ability to easily record a reference run to calculate standard running values and errors and correctly apply these to later actual runs to quickly get accurate run data with errors with no post-processing of data required. 
 
 
 # Pros
@@ -9,6 +9,11 @@ Python package for recording power, CPU, GPU, and memory metrics during testing 
 - ability to record reference data which is automatically subtracted from later logs. But raw data is left untouched to maintain all original data. But the metadata and plots provide the reference adjusted values, as would be required in publications. 
 - Recording a reference dataset during a constant idle state of the system allows standard deviation to be logged as well and applied to the run graphs.
 - Detailed, publication-worthy graphs with infill +/- 1 standard deviation for quick run data inspection. 
+
+
+# Prerequisites
+- linux OS
+- cuda toolkit installed (nvidia-smi)
 
 
 

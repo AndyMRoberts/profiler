@@ -298,3 +298,67 @@ class TestProfilerDataQuality:
             assert "metrics_available" in meta
             ma = meta["metrics_available"]
             assert "cpu_power" in ma and "gpu_power" in ma and "gpu_usage" in ma and "gpu_memory" in ma
+
+    def test_metadata_averages_include_stddev(self):
+        """Metadata averages block includes key_stddev for each metric (run stdev when no reference)."""
+        _require_full_setup()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            p = Profiler(tmpdir, frequency_hz=4.0)
+            p.start()
+            time.sleep(0.8)  # enough samples for non-zero stddev possibility
+            p.stop()
+            with open(p._run_dir / "metadata.json") as f:
+                meta = json.load(f)
+            assert "averages" in meta, "averages block missing"
+            av = meta["averages"]
+            expected_keys = [
+                "cpu_usage_percent", "cpu_power_w", "gpu_power_w", "gpu_usage_percent",
+                "gpu_memory_gb", "gpu_memory_percent", "ram_usage_percent",
+                "ram_used_gb", "ram_available_gb",
+            ]
+            for k in expected_keys:
+                assert k in av, f"averages missing key {k}"
+                stddev_key = k + "_stddev"
+                assert stddev_key in av, f"averages missing {stddev_key}"
+                val = av[stddev_key]
+                assert val is None or isinstance(val, (int, float)), f"{stddev_key} must be number or null"
+                if val is not None:
+                    assert val >= 0, f"{stddev_key} must be non-negative"
+
+    def test_reference_metadata_include_stddev(self):
+        """Reference run metadata includes averages with _stddev for each metric."""
+        _require_full_setup()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            p = Profiler(tmpdir, frequency_hz=4.0, title="Ref test")
+            p.record_reference(2)  # 2 seconds of reference
+            ref_meta_path = Path(tmpdir) / "reference" / "metadata.json"
+            assert ref_meta_path.exists(), "reference metadata.json missing"
+            with open(ref_meta_path) as f:
+                meta = json.load(f)
+            assert "averages" in meta
+            av = meta["averages"]
+            for k in ["cpu_usage_percent", "ram_usage_percent", "ram_used_gb", "ram_available_gb"]:
+                assert k in av
+                assert (k + "_stddev") in av
+                std = av[k + "_stddev"]
+                assert std is None or (isinstance(std, (int, float)) and std >= 0)
+
+    def test_reference_adjusted_run_metadata_include_stddev(self):
+        """When use_reference=True, averages_reference_adjusted includes _stddev (from reference)."""
+        _require_full_setup()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            p = Profiler(tmpdir, frequency_hz=4.0, title="Adjusted test")
+            p.record_reference(2)
+            p.start(use_reference=True)
+            time.sleep(0.6)
+            p.stop()
+            with open(p._run_dir / "metadata.json") as f:
+                meta = json.load(f)
+            assert "averages_reference_adjusted" in meta
+            adj = meta["averages_reference_adjusted"]
+            for k in ["cpu_usage_percent", "ram_usage_percent"]:
+                assert k in adj
+                stddev_key = k + "_stddev"
+                assert stddev_key in adj, f"averages_reference_adjusted missing {stddev_key}"
+                val = adj[stddev_key]
+                assert val is None or (isinstance(val, (int, float)) and val >= 0)

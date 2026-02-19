@@ -407,8 +407,9 @@ class Profiler:
         
         run_time = time.perf_counter() - self._start_time if self._start_time else 0
         
-        # Compute energy per frame stats if requested
+        # Compute energy per frame stats if requested (and sum_dt_sq for error propagation)
         energy_per_frame_min = energy_per_frame_max = energy_per_frame_avg = None
+        sum_dt_sq: float = 0.0
         if num_frames is not None and num_frames > 0 and self._samples:
             total_energy_j = 0
             time_per_frame = run_time / num_frames
@@ -416,6 +417,7 @@ class Profiler:
                 dt = self._samples[i].elapsed_s - self._samples[i - 1].elapsed_s
                 if dt <= 0:
                     dt = 1.0 / self.frequency_hz
+                sum_dt_sq += dt * dt
                 cpu_w = self._samples[i].cpu_power_w or 0
                 gpu_w = self._samples[i].gpu_power_w or 0
                 total_energy_j += (cpu_w + gpu_w) * dt
@@ -468,6 +470,7 @@ class Profiler:
             energy_per_frame_min=energy_per_frame_min,
             energy_per_frame_max=energy_per_frame_max,
             energy_per_frame_avg=energy_per_frame_avg,
+            sum_dt_sq=sum_dt_sq,
             metrics_available=metrics_available,
             averages=averages,
             stddevs=stddevs,
@@ -645,7 +648,8 @@ class Profiler:
         energy_per_frame_min: Optional[float],
         energy_per_frame_max: Optional[float],
         energy_per_frame_avg: Optional[float],
-        metrics_available: dict,
+        sum_dt_sq: float = 0.0,
+        metrics_available: dict = None,
         averages: Optional[dict] = None,
         stddevs: Optional[dict] = None,
         ref_averages: Optional[dict] = None,
@@ -657,12 +661,13 @@ class Profiler:
             return round(v, 2) if v is not None else None
 
         meta = {
+            "timestamp": datetime.now().isoformat(),
             "title": self.title,
             "run_time_s": round(run_time_s, 2),
             "num_samples": len(self._samples),
             "frequency_hz": round(self.frequency_hz, 2),
             "run_directory": str(self._run_dir),
-            "metrics_available": metrics_available,
+            "metrics_available": metrics_available or {},
         }
         if averages:
             # Each key followed by key_stddev: ref stdev when reference exists, else run stdev.
@@ -674,10 +679,26 @@ class Profiler:
         if num_frames is not None:
             meta["num_frames"] = num_frames
             if energy_per_frame_avg is not None:
+                # Error propagation: E = P*t or sum(P_i*dt_i). Assume 0 error on num_frames.
+                # sigma_P = sqrt(sigma_cpu^2 + sigma_gpu^2); sigma_total_energy = sigma_P * sqrt(sum(dt_i^2))
+                # sigma_avg = sigma_total_energy / num_frames; sigma_min/max = sigma_P * time_per_frame
+                time_per_frame = run_time_s / num_frames
+                _stdev_src = (ref_stddevs or {}) if ref_averages else (stddevs or {})
+                sigma_cpu = _stdev_src.get("cpu_power_w") or 0
+                sigma_gpu = _stdev_src.get("gpu_power_w") or 0
+                sigma_power = (sigma_cpu ** 2 + sigma_gpu ** 2) ** 0.5
+                sigma_total = sigma_power * (sum_dt_sq ** 0.5) if sum_dt_sq > 0 else 0.0
+                ef_min_std = sigma_power * time_per_frame if time_per_frame > 0 else None
+                ef_max_std = sigma_power * time_per_frame if time_per_frame > 0 else None
+                ef_avg_std = sigma_total / num_frames if num_frames > 0 else None
+
                 meta["energy_per_frame_j"] = {
                     "min": round(energy_per_frame_min, 2),
+                    "min_stddev": _round_val(ef_min_std),
                     "max": round(energy_per_frame_max, 2),
+                    "max_stddev": _round_val(ef_max_std),
                     "avg": round(energy_per_frame_avg, 2),
+                    "avg_stddev": _round_val(ef_avg_std),
                 }
                 if ref_energy_per_frame_j:
                     ref_ef = ref_energy_per_frame_j
@@ -690,6 +711,16 @@ class Profiler:
                         "max": _round_val(_adj_ef(energy_per_frame_max, ref_ef.get("max"))),
                         "avg": _round_val(_adj_ef(energy_per_frame_avg, ref_ef.get("avg"))),
                     }
+                    # Propagated stddev for adjusted: sqrt(sigma_run^2 + sigma_ref^2)
+                    ref_min_s = ref_ef.get("min_stddev") if isinstance(ref_ef.get("min_stddev"), (int, float)) else 0
+                    ref_max_s = ref_ef.get("max_stddev") if isinstance(ref_ef.get("max_stddev"), (int, float)) else 0
+                    ref_avg_s = ref_ef.get("avg_stddev") if isinstance(ref_ef.get("avg_stddev"), (int, float)) else 0
+                    run_min_s = ef_min_std or 0
+                    run_max_s = ef_max_std or 0
+                    run_avg_s = ef_avg_std or 0
+                    meta["energy_per_frame_j_reference_adjusted"]["min_stddev"] = _round_val((run_min_s ** 2 + ref_min_s ** 2) ** 0.5)
+                    meta["energy_per_frame_j_reference_adjusted"]["max_stddev"] = _round_val((run_max_s ** 2 + ref_max_s ** 2) ** 0.5)
+                    meta["energy_per_frame_j_reference_adjusted"]["avg_stddev"] = _round_val((run_avg_s ** 2 + ref_avg_s ** 2) ** 0.5)
         if ref_averages and averages:
             meta["averages_reference_adjusted"] = {}
             ref_std = ref_stddevs or {}
