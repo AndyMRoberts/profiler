@@ -19,10 +19,12 @@ A one-stop-shop for energy and memory linux profiling for use benchmarking ML, D
 
 ## Install
 
+Clone the repository to a project location. Then from your current desired project environment:
 ```bash
-pip install -e .         # GPU memory, power, CPU usage, etc. (nvidia-ml-py, pyJoules, psutil, matplotlib)
+pip install -e /path/to/profiler # GPU memory, power, CPU usage, etc. (nvidia-ml-py, pyJoules, psutil, matplotlib)
 pip install -e .[test]   # Add pytest for running tests
 ```
+'-e' argument means you can modify the profiler and changes are picked up without having to reinstall. 
 
 ## Usage
 
