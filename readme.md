@@ -2,6 +2,16 @@
 
 Python package for recording power, CPU, GPU, and memory metrics during testing of ML models, SLAM systems, etc.
 
+
+# Pros
+- simple to run, once installed all data is saved to its own "timestamp_title" folder to ensure data organisation
+- this location is returned so the user can add any other logs to the same folder, taking care or logging infrastructure
+- ability to record reference data which is automatically subtracted from later logs. But raw data is left untouched to maintain all original data. But the metadata and plots provide the reference adjusted values, as would be required in publications. 
+- Recording a reference dataset during a constant idle state of the system allows standard deviation to be logged as well and applied to the run graphs.
+- Detailed, publication-worthy graphs with infill +/- 1 standard deviation for quick run data inspection. 
+
+
+
 ## Install
 
 ```bash
@@ -21,13 +31,31 @@ Profiler.verify_setup()
 # A new subdirectory is created per run: {dir}/{YYYY}_{MM}_{DD}_{HHMM}_{title_with_underscores}/
 p = Profiler("runs", frequency_hz=2.0, title="SLAM inference test")
 
-# Start recording (runs in background thread)
-p.start()
+# optional: record a reference set of data first:
+# these are automatically recorded to the {output_dir}/reference folder. So subsequent recordings will
+# overwrite each other. Move the reference directory to another folder and provide filepath later on if desired.
+print(f'Recording reference to {output_dir}/reference')
+ref_dir  = p.record_reference(duration_seconds=10)
+
+# option to store own data in reference directory
+with open(f'{ref_dir}/extra_data.txt', 'w') as f:
+    f.write('This data was recorded whilst the system was in a rest state.')
+
+# Start recording (runs in background thread) 
+# if a reference has been recorded
+run_dir = p.start(
+    use_reference=True,
+    ref_dir = '' # if blank or not provided the code will pick up the last previously recorded reference
+    )
 
 # ... run your ML model, SLAM pipeline, etc. ...
 
 # Stop and write outputs; optionally pass num_frames for energy-per-frame stats
 p.stop(num_frames=100)
+
+# option to add data the run_dir
+with open(f'{run_dir}/extra_data.txt', 'w') as f:
+    f.write('Run completed successfully')
 
 # Outputs (in e.g. runs/2026_02_19_1430_SLAM_inference_test/):
 #   data.csv      - Time-series data (time, cpu %, cpu power, gpu power, etc.)
