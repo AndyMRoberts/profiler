@@ -1,7 +1,8 @@
-from profiler import Profiler
+from profiler import Profiler, ProfilerSetupError
 import time
 import os
 
+Profiler.verify_setup()
 
 # Create profiler: output base name, sampling frequency (Hz), title
 output_dir = f'{os.path.dirname(os.path.abspath(__file__))}/runs'
