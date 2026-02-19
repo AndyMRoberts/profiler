@@ -119,6 +119,9 @@ class Profiler:
         self._energy_samples: list[dict] = []
         self._gpu_handle = None
         self._sample_error: Optional[Exception] = None  # Set if sampling loop fails
+        self._run_dir_override: Optional[Path] = None  # e.g. output_directory / "reference"
+        self._use_reference = False
+        self._ref_dir: Optional[Path] = None  # location of reference folder when use_reference=True
 
     def _validate_and_init(self) -> None:
         """Validate required packages and init GPU/RAPL. Raises ProfilerSetupError on failure."""
@@ -192,6 +195,28 @@ class Profiler:
         gpu_mem_gb = mem.used / (1024 ** 3)
         gpu_mem_pct = (mem.used / mem.total * 100) if mem.total > 0 else None
         return power_w, gpu_usage, gpu_mem_gb, gpu_mem_pct
+
+    def _compute_averages(self) -> dict:
+        """Compute average of each metric across samples. None values excluded from mean."""
+        if not self._samples:
+            return {}
+        n = len(self._samples)
+        cpu_power_vals = [s.cpu_power_w for s in self._samples if s.cpu_power_w is not None]
+        gpu_power_vals = [s.gpu_power_w for s in self._samples if s.gpu_power_w is not None]
+        gpu_usage_vals = [s.gpu_usage_percent for s in self._samples if s.gpu_usage_percent is not None]
+        gpu_mem_gb_vals = [s.gpu_memory_gb for s in self._samples if s.gpu_memory_gb is not None]
+        gpu_mem_pct_vals = [s.gpu_memory_percent for s in self._samples if s.gpu_memory_percent is not None]
+        return {
+            "cpu_usage_percent": sum(s.cpu_usage_percent for s in self._samples) / n,
+            "cpu_power_w": sum(cpu_power_vals) / len(cpu_power_vals) if cpu_power_vals else None,
+            "gpu_power_w": sum(gpu_power_vals) / len(gpu_power_vals) if gpu_power_vals else None,
+            "gpu_usage_percent": sum(gpu_usage_vals) / len(gpu_usage_vals) if gpu_usage_vals else None,
+            "gpu_memory_gb": sum(gpu_mem_gb_vals) / len(gpu_mem_gb_vals) if gpu_mem_gb_vals else None,
+            "gpu_memory_percent": sum(gpu_mem_pct_vals) / len(gpu_mem_pct_vals) if gpu_mem_pct_vals else None,
+            "ram_usage_percent": sum(s.ram_usage_percent for s in self._samples) / n,
+            "ram_used_gb": sum(s.ram_used_gb for s in self._samples) / n,
+            "ram_available_gb": sum(s.ram_available_gb for s in self._samples) / n,
+        }
     
     def _sample_loop(self):
         """Background thread: collect metrics at the requested frequency."""
@@ -238,12 +263,44 @@ class Profiler:
         except Exception as e:
             self._sample_error = e
     
-    def start(self):
-        """Start recording metrics in a background thread. Raises ProfilerSetupError if setup fails."""
+    def record_reference(self, duration_seconds: int) -> None:
+        """
+        Record a reference set of data for the given duration (in seconds).
+        Saves to {output_directory}/reference/ (no timestamp). Same outputs as a normal run:
+        data.csv, plot.png, metadata.json (including averages used for reference-adjusted runs).
+
+        Args:
+            duration_seconds: How long to record (integer seconds).
+        """
+        self._run_dir_override = self.output_directory / "reference"
+        self.start()
+        try:
+            time.sleep(int(duration_seconds))
+        finally:
+            self.stop(num_frames=None)
+        self._run_dir_override = None
+
+    def start(
+        self,
+        use_reference: bool = False,
+        ref_dir: Optional[str] = None,
+    ):
+        """
+        Start recording metrics in a background thread. Raises ProfilerSetupError if setup fails.
+
+        Args:
+            use_reference: If True, load reference metadata from ref_dir and subtract reference
+                averages from this run's metadata and plot. CSV remains raw (non-referenced).
+            ref_dir: Optional path to the reference folder. If use_reference is True and ref_dir
+                is not provided, uses {output_directory}/reference.
+        """
         if self._running:
             return
         self._samples.clear()
         self._sample_error = None
+        self._run_dir = None  # allow this run to be stopped and written (clears previous run’s dir)
+        self._use_reference = use_reference
+        self._ref_dir = Path(ref_dir) if ref_dir else (self.output_directory / "reference" if use_reference else None)
         self._start_time = time.perf_counter()
         self._start_wall_time = time.time()
         self._running = True
@@ -251,7 +308,7 @@ class Profiler:
         # Validate packages and init GPU + RAPL; raises ProfilerSetupError on failure
         self._validate_and_init()
 
-        self._thread = threading.Thread(target=self._sample_loop)
+        self._thread = threading.Thread(target=self._sample_loop, daemon=True)
         self._thread.start()
     
     def stop(self, num_frames: Optional[int] = None):
@@ -282,12 +339,15 @@ class Profiler:
             err = self._sample_error
             self._sample_error = None
             raise err
-        
-        # Create run subdirectory: {output_dir}/{YYYY}_{MM}_{DD}_{HHMM}_{title_with_underscores}/
-        dt = datetime.fromtimestamp(self._start_wall_time) if self._start_wall_time else datetime.now()
-        sanitized_title = re.sub(r"[^\w\-]", "_", self.title).strip("_") or "run"
-        run_dir_name = f"{dt:%Y_%m_%d_%H%M}_{sanitized_title}"
-        self._run_dir = self.output_directory / run_dir_name
+
+        # Create run subdirectory (or use override for reference recording)
+        if self._run_dir_override is not None:
+            self._run_dir = self._run_dir_override
+        else:
+            dt = datetime.fromtimestamp(self._start_wall_time) if self._start_wall_time else datetime.now()
+            sanitized_title = re.sub(r"[^\w\-]", "_", self.title).strip("_") or "run"
+            run_dir_name = f"{dt:%Y_%m_%d_%H%M}_{sanitized_title}"
+            self._run_dir = self.output_directory / run_dir_name
         self._run_dir.mkdir(parents=True, exist_ok=True)
         
         # Backfill CPU power from pyJoules trace (energy/duration per interval)
@@ -334,9 +394,23 @@ class Profiler:
             "gpu_memory": any(s.gpu_memory_gb is not None for s in self._samples),
         }
 
-        # Write outputs
+        averages = self._compute_averages()
+        ref_averages: Optional[dict] = None
+        ref_energy_per_frame_j: Optional[dict] = None
+        if self._use_reference and self._ref_dir is not None:
+            ref_meta_path = self._ref_dir / "metadata.json"
+            if ref_meta_path.exists():
+                with open(ref_meta_path) as f:
+                    ref_meta = json.load(f)
+                ref_averages = ref_meta.get("averages")
+                ref_energy_per_frame_j = ref_meta.get("energy_per_frame_j")
+
+        # Write outputs (CSV is always raw; plot and metadata use reference adjustment when requested)
         self._write_csv()
-        self._write_plot()
+        self._write_plot(
+            ref_averages=ref_averages,
+            title_suffix=" (reference adjusted)" if (self._use_reference and ref_averages) else None,
+        )
         self._write_metadata(
             run_time_s=run_time,
             num_frames=num_frames,
@@ -344,6 +418,9 @@ class Profiler:
             energy_per_frame_max=energy_per_frame_max,
             energy_per_frame_avg=energy_per_frame_avg,
             metrics_available=metrics_available,
+            averages=averages,
+            ref_averages=ref_averages,
+            ref_energy_per_frame_j=ref_energy_per_frame_j,
         )
     
     def _write_csv(self):
@@ -370,71 +447,86 @@ class Profiler:
                     f"{s.ram_available_gb:.2f}",
                 ])
     
-    def _write_plot(self):
-        """Generate matplotlib PNG plot of all metrics."""
+    def _write_plot(
+        self,
+        ref_averages: Optional[dict] = None,
+        title_suffix: Optional[str] = None,
+    ):
+        """Generate matplotlib PNG plot of all metrics. If ref_averages given, plot (data - ref)."""
         import matplotlib
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
 
         if not self._samples:
             return
-        
+
+        def _sub_ref(vals: list, key: str):
+            if not ref_averages or key not in ref_averages or ref_averages[key] is None:
+                return [v if v is not None else float("nan") for v in vals]
+            ref = ref_averages[key]
+            return [(max(0.0, v - ref)) if v is not None else float("nan") for v in vals]
+
         times = [s.elapsed_s for s in self._samples]
-        
+        title = self.title + (title_suffix or "")
+
         fig, axes = plt.subplots(3, 2, figsize=(12, 10))
-        fig.suptitle(self.title, fontsize=14)
-        
+        fig.suptitle(title, fontsize=14)
+
         # CPU usage
         ax = axes[0, 0]
-        ax.plot(times, [s.cpu_usage_percent for s in self._samples], "b-", label="CPU %")
+        cpu_usage = [s.cpu_usage_percent for s in self._samples]
+        ax.plot(times, _sub_ref(cpu_usage, "cpu_usage_percent"), "b-", label="CPU %")
         ax.set_ylabel("CPU usage (%)")
         ax.legend(loc="upper right")
         ax.grid(True, alpha=0.3)
-        
+
         # CPU power
         ax = axes[0, 1]
-        cpu_power = [s.cpu_power_w if s.cpu_power_w is not None else float("nan") for s in self._samples]
-        ax.plot(times, cpu_power, "g-", label="CPU power (W)")
+        ax.plot(times, _sub_ref([s.cpu_power_w for s in self._samples], "cpu_power_w"), "g-", label="CPU power (W)")
         ax.set_ylabel("CPU power (W)")
         ax.legend(loc="upper right")
         ax.grid(True, alpha=0.3)
-        
+
         # GPU usage
         ax = axes[1, 0]
-        gpu_usage = [s.gpu_usage_percent if s.gpu_usage_percent is not None else float("nan") for s in self._samples]
-        ax.plot(times, gpu_usage, "orange", label="GPU %")
+        ax.plot(times, _sub_ref([s.gpu_usage_percent for s in self._samples], "gpu_usage_percent"), "orange", label="GPU %")
         ax.set_ylabel("GPU usage (%)")
         ax.legend(loc="upper right")
         ax.grid(True, alpha=0.3)
-        
+
         # GPU power
         ax = axes[1, 1]
-        gpu_power = [s.gpu_power_w if s.gpu_power_w is not None else float("nan") for s in self._samples]
-        ax.plot(times, gpu_power, "red", label="GPU power (W)")
+        ax.plot(times, _sub_ref([s.gpu_power_w for s in self._samples], "gpu_power_w"), "red", label="GPU power (W)")
         ax.set_ylabel("GPU power (W)")
         ax.legend(loc="upper right")
         ax.grid(True, alpha=0.3)
-        
+
         # GPU memory
         ax = axes[2, 0]
-        gpu_mem = [s.gpu_memory_gb if s.gpu_memory_gb is not None else float("nan") for s in self._samples]
-        ax.plot(times, gpu_mem, "purple", label="GPU memory (GB)")
+        ax.plot(times, _sub_ref([s.gpu_memory_gb for s in self._samples], "gpu_memory_gb"), "purple", label="GPU memory (GB)")
         ax.set_ylabel("GPU memory (GB)")
         ax.legend(loc="upper right")
         ax.grid(True, alpha=0.3)
-        
+
         # RAM
         ax = axes[2, 1]
-        ax.plot(times, [s.ram_usage_percent for s in self._samples], "brown", label="RAM %")
+        ram_usage = [s.ram_usage_percent for s in self._samples]
+        ax.plot(times, _sub_ref(ram_usage, "ram_usage_percent"), "brown", label="RAM %")
         ax.set_ylabel("RAM usage (%)")
         ax.set_xlabel("Time (s)")
         ax.legend(loc="upper right")
         ax.grid(True, alpha=0.3)
-        
+
         for ax in axes.flat:
             ax.set_xlabel("Time (s)" if ax.get_subplotspec().is_last_row() else "")
-        
+
         plt.tight_layout()
+        for ax in fig.axes:
+            ax.set_ylim(bottom=0)
+            low, high = ax.get_ylim()
+            # Ensure zero is visible: if range is flat or tiny, set a small range so 0 is shown
+            if high <= low or (high - low) < 0.01:
+                ax.set_ylim(0, 1)
         png_path = self._run_dir / "plot.png"
         plt.savefig(png_path, dpi=150)
         plt.close()
@@ -447,8 +539,14 @@ class Profiler:
         energy_per_frame_max: Optional[float],
         energy_per_frame_avg: Optional[float],
         metrics_available: dict,
+        averages: Optional[dict] = None,
+        ref_averages: Optional[dict] = None,
+        ref_energy_per_frame_j: Optional[dict] = None,
     ):
         """Write metadata JSON. All numeric values rounded to 2 decimal places."""
+        def _round_val(v):
+            return round(v, 2) if v is not None else None
+
         meta = {
             "title": self.title,
             "run_time_s": round(run_time_s, 2),
@@ -457,6 +555,8 @@ class Profiler:
             "run_directory": str(self._run_dir),
             "metrics_available": metrics_available,
         }
+        if averages:
+            meta["averages"] = {k: _round_val(v) for k, v in averages.items()}
         if num_frames is not None:
             meta["num_frames"] = num_frames
             if energy_per_frame_avg is not None:
@@ -465,7 +565,26 @@ class Profiler:
                     "max": round(energy_per_frame_max, 2),
                     "avg": round(energy_per_frame_avg, 2),
                 }
-        
+                if ref_energy_per_frame_j:
+                    ref_ef = ref_energy_per_frame_j
+                    def _adj_ef(raw, ref_val):
+                        if raw is None or ref_val is None:
+                            return None
+                        return max(0.0, raw - ref_val)
+                    meta["energy_per_frame_j_reference_adjusted"] = {
+                        "min": _round_val(_adj_ef(energy_per_frame_min, ref_ef.get("min"))),
+                        "max": _round_val(_adj_ef(energy_per_frame_max, ref_ef.get("max"))),
+                        "avg": _round_val(_adj_ef(energy_per_frame_avg, ref_ef.get("avg"))),
+                    }
+        if ref_averages and averages:
+            meta["averages_reference_adjusted"] = {}
+            for k, v in averages.items():
+                r = ref_averages.get(k)
+                if r is not None and v is not None and k != "ram_available_gb":
+                    meta["averages_reference_adjusted"][k] = _round_val(max(0.0, v - r))
+                else:
+                    meta["averages_reference_adjusted"][k] = _round_val(v)
+
         meta_path = self._run_dir / "metadata.json"
         with open(meta_path, "w") as f:
             json.dump(meta, f, indent=2)
