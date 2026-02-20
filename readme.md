@@ -35,8 +35,13 @@ from profiler import Profiler, ProfilerSetupError
 Profiler.verify_setup()
 
 # Create profiler: output directory, sampling frequency (Hz), title
+# Optional: cpu_power_max_w / gpu_power_max_w fix the y-axis ceiling on the power subplots so
+# the same scale is used across runs for easy visual comparison.
+# GPU memory ceiling is read automatically from the system (total VRAM).
+# Percentage metrics (CPU %, GPU %, RAM %) are always capped at 100.
 # A new subdirectory is created per run: {dir}/{YYYY}_{MM}_{DD}_{HHMM}_{title_with_underscores}/
-p = Profiler("runs", frequency_hz=2.0, title="SLAM inference test")
+p = Profiler("runs", frequency_hz=2.0, title="SLAM inference test",
+             cpu_power_max_w=150.0, gpu_power_max_w=300.0)
 
 # optional: record a reference set of data first:
 # these are automatically recorded to the {output_dir}/reference folder. So subsequent recordings will
