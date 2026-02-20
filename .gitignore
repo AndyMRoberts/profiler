@@ -221,3 +221,6 @@ __marimo__/
 # other files/folders used only for developing
 activate.sh
 
+# project
+.vscode/*
+
