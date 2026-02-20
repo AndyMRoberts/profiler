@@ -604,7 +604,7 @@ class Profiler:
         ax.grid(True, alpha=0.3)
 
         # GPU memory
-        ax = axes[2, 0]
+        ax = axes[2, 1]
         color = "purple"
         ys_gmem = _sub_ref([s.gpu_memory_gb for s in self._samples], "gpu_memory_gb")
         std = _fill_stddev("gpu_memory_gb")
@@ -615,7 +615,7 @@ class Profiler:
         ax.grid(True, alpha=0.3)
 
         # RAM
-        ax = axes[2, 1]
+        ax = axes[2, 0]
         color = "brown"
         ram_usage = [s.ram_usage_percent for s in self._samples]
         ys_ram = _sub_ref(ram_usage, "ram_usage_percent")
