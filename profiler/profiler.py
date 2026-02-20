@@ -97,6 +97,8 @@ class Profiler:
         output_directory: str,
         frequency_hz: float = 1.0,
         title: str = "Profiling run",
+        cpu_power_max_w: Optional[float] = None,
+        gpu_power_max_w: Optional[float] = None,
     ):
         """
         Args:
@@ -105,10 +107,15 @@ class Profiler:
                 containing metadata.json, data.csv, plot.png
             frequency_hz: Sampling frequency in Hz (e.g. 1.0 = once per second)
             title: Title for the profiling run (spaces → underscores in run dir name), stored in metadata.
+            cpu_power_max_w: Optional upper y-axis limit (W) for the CPU power subplot.
+            gpu_power_max_w: Optional upper y-axis limit (W) for the GPU power subplot.
         """
         self.output_directory = Path(output_directory)
         self.frequency_hz = frequency_hz
         self.title = title
+        self.cpu_power_max_w = cpu_power_max_w
+        self.gpu_power_max_w = gpu_power_max_w
+        self._gpu_memory_total_gb: Optional[float] = None
         self._run_dir: Optional[Path] = None  # Set in stop() when run directory is created
         self._samples: list[Sample] = []
         self._running = False
@@ -148,6 +155,13 @@ class Profiler:
                         self._gpu_handle = None
                         pynvml.nvmlShutdown()
                         errors.append(f"GPU: Cannot read utilization: {e}")
+                    # Read total GPU memory for plot y-axis upper limit
+                    if self._gpu_handle is not None:
+                        try:
+                            mem_info = pynvml.nvmlDeviceGetMemoryInfo(self._gpu_handle)
+                            self._gpu_memory_total_gb = mem_info.total / (1024 ** 3)
+                        except Exception:
+                            pass  # Non-critical: plot will auto-scale the GPU memory axis
             except Exception as e:
                 errors.append(f"GPU: {e}. Ensure nvidia-smi works and you're in 'video' group.")
 
@@ -631,12 +645,25 @@ class Profiler:
             ax.set_xlabel("Time (s)" if ax.get_subplotspec().is_last_row() else "")
 
         plt.tight_layout()
+
+        # Apply y-axis upper limits: % metrics capped at 100, power/memory from config/system
+        _ylim_tops = {
+            axes[0, 0]: 100.0,                          # CPU usage (%)
+            axes[1, 0]: 100.0,                          # GPU usage (%)
+            axes[2, 0]: 100.0,                          # RAM usage (%)
+            axes[0, 1]: self.cpu_power_max_w,           # CPU power (W)
+            axes[1, 1]: self.gpu_power_max_w,           # GPU power (W)
+            axes[2, 1]: self._gpu_memory_total_gb,      # GPU memory (GB)
+        }
         for ax in fig.axes:
             ax.set_ylim(bottom=0)
             low, high = ax.get_ylim()
             # Ensure zero is visible: if range is flat or tiny, set a small range so 0 is shown
             if high <= low or (high - low) < 0.01:
                 ax.set_ylim(0, 1)
+            top = _ylim_tops.get(ax)
+            if top is not None:
+                ax.set_ylim(0, top)
         png_path = self._run_dir / "plot.png"
         plt.savefig(png_path, dpi=150)
         plt.close()
