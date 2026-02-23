@@ -11,4 +11,4 @@ p = Profiler(
 )
 
 # Reprocess a run: regenerate plot.png and metadata.json (with reference-adjusted stats if ref given)
-p.reprocess_data("tests/runs/2026_02_23_1228_SLAM_inference_test", reference_dir="tests/runs/reference")
+p.reprocess_data("tests/runs/2026_02_23_1619_SLAM_inference_test", reference_dir="tests/runs/reference")

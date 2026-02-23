@@ -390,8 +390,8 @@ class Profiler:
 
     def reprocess_data(
         self,
-        target_dir: str | Path,
-        reference_dir: Optional[str | Path] = None,
+        target_dir: str or Path,
+        reference_dir: Optional[str or Path] = None,
     ) -> str:
         """
         Regenerate plot.png and metadata.json in a target run directory from its
@@ -454,20 +454,22 @@ class Profiler:
 
         title = self.title
         frequency_hz = self.frequency_hz
+        existing_meta: Optional[dict] = None
         meta_path = target_dir / "metadata.json"
         if meta_path.exists():
             try:
                 with open(meta_path) as mf:
-                    meta = json.load(mf)
-                    if meta.get("title"):
-                        title = meta["title"]
-                    if meta.get("frequency_hz") is not None:
-                        frequency_hz = meta["frequency_hz"]
+                    existing_meta = json.load(mf)
+                    if existing_meta.get("title"):
+                        title = existing_meta["title"]
+                    if existing_meta.get("frequency_hz") is not None:
+                        frequency_hz = existing_meta["frequency_hz"]
             except (json.JSONDecodeError, OSError):
-                pass
+                existing_meta = None
 
         ref_averages: Optional[dict] = None
         ref_stddevs: Optional[dict] = None
+        ref_energy_per_frame_j: Optional[dict] = None
         if reference_dir is not None:
             ref_dir = Path(reference_dir)
             ref_meta_path = ref_dir / "metadata.json"
@@ -481,6 +483,7 @@ class Profiler:
                         k[:-7]: v for k, v in raw.items()
                         if k.endswith("_stddev") and v is not None
                     }
+                    ref_energy_per_frame_j = ref_meta.get("energy_per_frame_j")
                 except (json.JSONDecodeError, OSError):
                     pass
 
@@ -502,21 +505,52 @@ class Profiler:
             self.frequency_hz = frequency_hz
             averages = self._compute_averages()
             stddevs = self._compute_stddevs(averages) if averages else {}
-            run_time_s = samples[-1].elapsed_s if samples else 0.0
+            # Use original run_time_s from metadata when present so energy_per_frame matches original processing
+            run_time_s = (
+                existing_meta.get("run_time_s")
+                if (existing_meta and existing_meta.get("run_time_s") is not None)
+                else (samples[-1].elapsed_s if samples else 0.0)
+            )
+
+            # Recompute energy_per_frame from samples when num_frames present in existing metadata.
+            # Use same run_time_s as original (from metadata) so min/max/avg match stop() exactly.
+            num_frames = existing_meta.get("num_frames") if existing_meta else None
+            energy_per_frame_min = energy_per_frame_max = energy_per_frame_avg = None
+            sum_dt_sq: float = 0.0
+            if num_frames is not None and num_frames > 0 and samples:
+                total_energy_j = 0.0
+                time_per_frame = run_time_s / num_frames
+                for i in range(1, len(samples)):
+                    dt = samples[i].elapsed_s - samples[i - 1].elapsed_s
+                    if dt <= 0:
+                        dt = 1.0 / frequency_hz
+                    sum_dt_sq += dt * dt
+                    cpu_w = samples[i].cpu_power_w or 0
+                    gpu_w = samples[i].gpu_power_w or 0
+                    total_energy_j += (cpu_w + gpu_w) * dt
+                energy_per_frame_avg = total_energy_j / num_frames
+                total_powers = [
+                    (s.cpu_power_w or 0) + (s.gpu_power_w or 0)
+                    for s in samples
+                ]
+                if total_powers and time_per_frame > 0:
+                    energy_per_frame_min = min(total_powers) * time_per_frame
+                    energy_per_frame_max = max(total_powers) * time_per_frame
 
             self._write_metadata(
                 run_time_s=run_time_s,
-                num_frames=None,
-                energy_per_frame_min=None,
-                energy_per_frame_max=None,
-                energy_per_frame_avg=None,
-                sum_dt_sq=0.0,
+                num_frames=num_frames,
+                energy_per_frame_min=energy_per_frame_min,
+                energy_per_frame_max=energy_per_frame_max,
+                energy_per_frame_avg=energy_per_frame_avg,
+                sum_dt_sq=sum_dt_sq,
                 metrics_available=metrics_available,
                 averages=averages,
                 stddevs=stddevs,
                 ref_averages=ref_averages,
                 ref_stddevs=ref_stddevs,
-                ref_energy_per_frame_j=None,
+                ref_energy_per_frame_j=ref_energy_per_frame_j,
+                merge_from=existing_meta,
             )
             self._write_plot(
                 run_dir=target_dir,
@@ -524,6 +558,8 @@ class Profiler:
                 title_override=title,
                 ref_averages=ref_averages,
                 ref_stddevs=ref_stddevs,
+                averages=averages,
+                stddevs=stddevs,
             )
         finally:
             self._run_dir = saved_run_dir
@@ -850,8 +886,13 @@ class Profiler:
         ref_averages: Optional[dict] = None,
         ref_stddevs: Optional[dict] = None,
         ref_energy_per_frame_j: Optional[dict] = None,
+        merge_from: Optional[dict] = None,
     ):
-        """Write metadata JSON. All numeric values rounded to 2 decimal places."""
+        """Write metadata JSON. All numeric values rounded to 2 decimal places.
+        If merge_from is provided (e.g. existing metadata when reprocessing), any keys
+        present in merge_from but not in the newly built meta are copied over to preserve
+        user data (e.g. num_frames, energy_per_frame_j, launch_params).
+        """
         def _round_val(v):
             return round(v, 2) if v is not None else None
 
@@ -874,18 +915,23 @@ class Profiler:
         if num_frames is not None:
             meta["num_frames"] = num_frames
             if energy_per_frame_avg is not None:
-                # Error propagation: E = P*t or sum(P_i*dt_i). Assume 0 error on num_frames.
-                # sigma_P = sqrt(sigma_cpu^2 + sigma_gpu^2); sigma_total_energy = sigma_P * sqrt(sum(dt_i^2))
-                # sigma_avg = sigma_total_energy / num_frames; sigma_min/max = sigma_P * time_per_frame
-                time_per_frame = run_time_s / num_frames
-                _stdev_src = (ref_stddevs or {}) if ref_averages else (stddevs or {})
-                sigma_cpu = _stdev_src.get("cpu_power_w") or 0
-                sigma_gpu = _stdev_src.get("gpu_power_w") or 0
-                sigma_power = (sigma_cpu ** 2 + sigma_gpu ** 2) ** 0.5
-                sigma_total = sigma_power * (sum_dt_sq ** 0.5) if sum_dt_sq > 0 else 0.0
-                ef_min_std = sigma_power * time_per_frame if time_per_frame > 0 else None
-                ef_max_std = sigma_power * time_per_frame if time_per_frame > 0 else None
-                ef_avg_std = sigma_total / num_frames if num_frames > 0 else None
+                # When reference is provided, use reference stddevs as-is (no recalculation).
+                # Otherwise compute from run's power stddevs and time.
+                if ref_energy_per_frame_j:
+                    ref_ef = ref_energy_per_frame_j
+                    ef_min_std = ref_ef.get("min_stddev")
+                    ef_max_std = ref_ef.get("max_stddev")
+                    ef_avg_std = ref_ef.get("avg_stddev")
+                else:
+                    time_per_frame = run_time_s / num_frames
+                    _stdev_src = (ref_stddevs or {}) if ref_averages else (stddevs or {})
+                    sigma_cpu = _stdev_src.get("cpu_power_w") or 0
+                    sigma_gpu = _stdev_src.get("gpu_power_w") or 0
+                    sigma_power = (sigma_cpu ** 2 + sigma_gpu ** 2) ** 0.5
+                    sigma_total = sigma_power * (sum_dt_sq ** 0.5) if sum_dt_sq > 0 else 0.0
+                    ef_min_std = sigma_power * time_per_frame if time_per_frame > 0 else None
+                    ef_max_std = sigma_power * time_per_frame if time_per_frame > 0 else None
+                    ef_avg_std = sigma_total / num_frames if num_frames > 0 else None
 
                 meta["energy_per_frame_j"] = {
                     "min": round(energy_per_frame_min, 2),
@@ -905,17 +951,10 @@ class Profiler:
                         "min": _round_val(_adj_ef(energy_per_frame_min, ref_ef.get("min"))),
                         "max": _round_val(_adj_ef(energy_per_frame_max, ref_ef.get("max"))),
                         "avg": _round_val(_adj_ef(energy_per_frame_avg, ref_ef.get("avg"))),
+                        "min_stddev": _round_val(ref_ef.get("min_stddev")),
+                        "max_stddev": _round_val(ref_ef.get("max_stddev")),
+                        "avg_stddev": _round_val(ref_ef.get("avg_stddev")),
                     }
-                    # Propagated stddev for adjusted: sqrt(sigma_run^2 + sigma_ref^2)
-                    ref_min_s = ref_ef.get("min_stddev") if isinstance(ref_ef.get("min_stddev"), (int, float)) else 0
-                    ref_max_s = ref_ef.get("max_stddev") if isinstance(ref_ef.get("max_stddev"), (int, float)) else 0
-                    ref_avg_s = ref_ef.get("avg_stddev") if isinstance(ref_ef.get("avg_stddev"), (int, float)) else 0
-                    run_min_s = ef_min_std or 0
-                    run_max_s = ef_max_std or 0
-                    run_avg_s = ef_avg_std or 0
-                    meta["energy_per_frame_j_reference_adjusted"]["min_stddev"] = _round_val((run_min_s ** 2 + ref_min_s ** 2) ** 0.5)
-                    meta["energy_per_frame_j_reference_adjusted"]["max_stddev"] = _round_val((run_max_s ** 2 + ref_max_s ** 2) ** 0.5)
-                    meta["energy_per_frame_j_reference_adjusted"]["avg_stddev"] = _round_val((run_avg_s ** 2 + ref_avg_s ** 2) ** 0.5)
         if ref_averages and averages:
             meta["averages_reference_adjusted"] = {}
             ref_std = ref_stddevs or {}
@@ -929,6 +968,18 @@ class Profiler:
                 else:
                     meta["averages_reference_adjusted"][k] = _round_val(v)
                     meta["averages_reference_adjusted"][k + "_stddev"] = _round_val(run_std.get(k))
+
+        if merge_from:
+            _preserve_keys = (
+                "timestamp", "title", "run_time_s", "num_samples",
+                "frequency_hz", "run_directory", "metrics_available",
+            )
+            for key in _preserve_keys:
+                if key in merge_from:
+                    meta[key] = merge_from[key]
+            for key, value in merge_from.items():
+                if key not in meta:
+                    meta[key] = value
 
         meta_path = self._run_dir / "metadata.json"
         with open(meta_path, "w") as f:
