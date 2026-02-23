@@ -270,15 +270,25 @@ class Profiler:
     def _sample_loop(self):
         """Background thread: collect metrics at the requested frequency."""
         interval = 1.0 / self.frequency_hz
+
+        first_sample = True
         try:
             while self._running:
-                loop_start = time.perf_counter()
-                elapsed = loop_start - self._start_time
-
+                if first_sample == True:
+                    # initial cpu power reading will be dsicarded so is started one interval before other readings. 
+                    if self._energy_meter is not None:
+                        self._energy_meter.record(tag=f"t{-interval}")
+                    first_sample = False
+                    time.sleep(interval)
+                    self._start_time = time.perf_counter()
+                    continue
                 # CPU power: record with pyJoules (RAPL) - energy between records backfilled after stop()
+                # First record is skipped in backfill as it is normally erroneously high
                 if self._energy_meter is not None:
                     self._energy_meter.record(tag=f"t{len(self._samples)}")
-                cpu_power = None  # Backfilled from pyJoules trace after stop()
+
+                loop_start = time.perf_counter()
+                elapsed = loop_start - self._start_time
 
                 # CPU usage
                 cpu_pct = psutil.cpu_percent(interval=None)
@@ -288,12 +298,12 @@ class Profiler:
 
                 # GPU
                 gpu_power, gpu_usage, gpu_mem_gb, gpu_mem_pct = self._read_gpu_metrics()
-            
+
                 sample = Sample(
                     timestamp=loop_start,
                     elapsed_s=elapsed,
                     cpu_usage_percent=cpu_pct,
-                    cpu_power_w=cpu_power,
+                    cpu_power_w=None,  # Backfilled from pyJoules trace after stop()
                     gpu_power_w=gpu_power,
                     gpu_usage_percent=gpu_usage,
                     gpu_memory_gb=gpu_mem_gb,
@@ -309,6 +319,7 @@ class Profiler:
                 sleep_time = max(0, interval - elapsed_in_loop)
                 if sleep_time > 0 and self._running:
                     time.sleep(sleep_time)
+
         except Exception as e:
             self._sample_error = e
     
@@ -412,13 +423,18 @@ class Profiler:
         # RAPL reports energy in microjoules (µJ); convert to J then power = J/s = W
         if self._energy_meter is not None and self._samples:
             trace = self._energy_meter.get_trace()
+
             if trace and trace._samples:
                 for i, sample in enumerate(trace._samples):
-                    if i < len(self._samples) and sample.duration > 0 and sample.energy:
+                    if i == 0:
+                        # Skip first trace interval (erroneously high)
+                        continue
+                    sample_idx = i - 1  # trace[1] -> samples[0], trace[2] -> samples[1], ...
+                    if sample_idx < len(self._samples) and sample.duration > 0 and sample.energy:
                         total_uj = sum(sample.energy.values())  # microjoules
                         total_j = total_uj / 1e6  # convert to joules
-                        self._samples[i].cpu_power_w = total_j / sample.duration
-        
+                        self._samples[sample_idx].cpu_power_w = total_j / sample.duration
+
         run_time = time.perf_counter() - self._start_time if self._start_time else 0
         
         # Compute energy per frame stats if requested (and sum_dt_sq for error propagation)
