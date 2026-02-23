@@ -673,6 +673,7 @@ class Profiler:
         }
         for ax in fig.axes:
             ax.set_ylim(bottom=0)
+            ax.set_xlim(xmin=0)
             low, high = ax.get_ylim()
             # Ensure zero is visible: if range is flat or tiny, set a small range so 0 is shown
             if high <= low or (high - low) < 0.01:
