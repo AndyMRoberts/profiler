@@ -10,8 +10,13 @@ output_dir = f'{os.path.dirname(os.path.abspath(__file__))}/runs'
 # cpu_power_max_w and gpu_power_max_w set fixed y-axis ceilings on the power subplots.
 # GPU memory upper limit is read automatically from the system.
 # Percentage metrics (CPU %, GPU %, RAM %) are always capped at 100.
-p = Profiler(output_dir, frequency_hz=2.0, title="SLAM inference test",
-             cpu_power_max_w=150.0, gpu_power_max_w=300.0)
+p = Profiler(output_dir, 
+            frequency_hz=2.0, 
+            title="SLAM inference test",
+            cpu_power_max_w=150.0, 
+            gpu_power_max_w=300.0,
+            gpu_memory_total_gb=16.376)
+
 print(f'Data will be saved to output directory: {output_dir}')
 
 #first record a 10s reference dataset

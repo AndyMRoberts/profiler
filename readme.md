@@ -35,12 +35,11 @@ from profiler import Profiler, ProfilerSetupError
 Profiler.verify_setup()
 
 # Create profiler: output directory, sampling frequency (Hz), title
-# Optional: cpu_power_max_w / gpu_power_max_w fix the y-axis ceiling on the power subplots so
-# the same scale is used across runs for easy visual comparison.
-# GPU memory ceiling is read automatically from the system (total VRAM).
+# gpu_memory_total_gb is required (total GPU VRAM in GB; sets plot y-axis for GPU memory).
+# Optional: cpu_power_max_w / gpu_power_max_w fix the y-axis ceiling on the power subplots.
 # Percentage metrics (CPU %, GPU %, RAM %) are always capped at 100.
 # A new subdirectory is created per run: {dir}/{YYYY}_{MM}_{DD}_{HHMM}_{title_with_underscores}/
-p = Profiler("runs", frequency_hz=2.0, title="SLAM inference test",
+p = Profiler("runs", gpu_memory_total_gb=16.376, frequency_hz=2.0, title="SLAM inference test",
              cpu_power_max_w=150.0, gpu_power_max_w=300.0)
 
 # optional: record a reference set of data first:
@@ -75,6 +74,29 @@ with open(f'{run_dir}/extra_data.txt', 'w') as f:
 #   metadata.json - Run time, title, energy per frame (min/max/avg) if num_frames given
 ```
 
+### Reprocess data (plots and metadata)
+If you change the reference values or update the plot/metadata logic and want to apply it to existing runs, use `reprocess_data()`. It rewrites `plot.png` and `metadata.json` in the target directory using that run's `data.csv` and optional reference metadata (for reference-adjusted plots and summary statistics). `gpu_memory_total_gb` is required at instantiation for both live runs and reprocessing.
+
+```python
+from profiler import Profiler
+from pathlib import Path
+
+p = Profiler(
+    output_directory="tests/runs",
+    title="SLAM inference test",
+    gpu_memory_total_gb=16.376,  # required: for plot y-axis and reprocess
+)
+
+# Reprocess a run (plot.png + metadata.json) with no reference
+p.reprocess_data("tests/runs/2026_02_23_1228_SLAM_inference_test")
+
+# Same run, compare against a different reference
+p.reprocess_data(
+    "tests/runs/2026_02_23_1228_SLAM_inference_test",
+    reference_dir="tests/runs/other_reference",
+)
+```
+
 ## Testing
 
 Tests live in `tests/` at the project root (separate from the installable package):
@@ -103,3 +125,4 @@ Check `metadata.json` after a run: `metrics_available` shows which optional metr
 ## Activate venv
 
 Venv is stored in a separate folder to prevent conflicts. Run `source activate.sh` or `. activate.sh` to activate.
+

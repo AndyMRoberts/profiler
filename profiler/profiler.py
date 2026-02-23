@@ -75,6 +75,9 @@ class Profiler:
         p.output_directory = Path(".")
         p.frequency_hz = 1.0
         p.title = ""
+        p.cpu_power_max_w = None
+        p.gpu_power_max_w = None
+        p._gpu_memory_total_gb = 16.376  # dummy for verify_setup only (no plotting)
         p._run_dir = None
         p._samples = []
         p._running = False
@@ -95,6 +98,7 @@ class Profiler:
     def __init__(
         self,
         output_directory: str,
+        gpu_memory_total_gb: float,
         frequency_hz: float = 1.0,
         title: str = "Profiling run",
         cpu_power_max_w: Optional[float] = None,
@@ -105,6 +109,8 @@ class Profiler:
             output_directory: Base directory for run outputs. A new subdir is created per run:
                 {output_directory}/{YYYY}_{MM}_{DD}_{HHMM}_{title_with_underscores}/
                 containing metadata.json, data.csv, plot.png
+            gpu_memory_total_gb: Total GPU memory in GB (plot y-axis for GPU memory; required for
+                both live logging and reprocess_data).
             frequency_hz: Sampling frequency in Hz (e.g. 1.0 = once per second)
             title: Title for the profiling run (spaces → underscores in run dir name), stored in metadata.
             cpu_power_max_w: Optional upper y-axis limit (W) for the CPU power subplot.
@@ -115,7 +121,7 @@ class Profiler:
         self.title = title
         self.cpu_power_max_w = cpu_power_max_w
         self.gpu_power_max_w = gpu_power_max_w
-        self._gpu_memory_total_gb: Optional[float] = None
+        self._gpu_memory_total_gb = gpu_memory_total_gb
         self._run_dir: Optional[Path] = None  # Set in stop() when run directory is created
         self._samples: list[Sample] = []
         self._running = False
@@ -155,13 +161,6 @@ class Profiler:
                         self._gpu_handle = None
                         pynvml.nvmlShutdown()
                         errors.append(f"GPU: Cannot read utilization: {e}")
-                    # Read total GPU memory for plot y-axis upper limit
-                    if self._gpu_handle is not None:
-                        try:
-                            mem_info = pynvml.nvmlDeviceGetMemoryInfo(self._gpu_handle)
-                            self._gpu_memory_total_gb = mem_info.total / (1024 ** 3)
-                        except Exception:
-                            pass  # Non-critical: plot will auto-scale the GPU memory axis
             except Exception as e:
                 errors.append(f"GPU: {e}. Ensure nvidia-smi works and you're in 'video' group.")
 
@@ -389,6 +388,151 @@ class Profiler:
         self._thread.start()
         return str(self._run_dir)
 
+    def reprocess_data(
+        self,
+        target_dir: str | Path,
+        reference_dir: Optional[str | Path] = None,
+    ) -> str:
+        """
+        Regenerate plot.png and metadata.json in a target run directory from its
+        data.csv, using optional reference metadata for reference-adjusted plots
+        and summary statistics.
+
+        Use this to apply updated plot styling to legacy data, or to compare
+        the same run against different references by passing different reference_dir.
+        Summary statistics (averages, stddevs, reference-adjusted averages) are
+        recomputed and written to metadata.json.
+
+        Args:
+            target_dir: Path to the run directory containing data.csv (and optionally
+                metadata.json for title/frequency_hz). plot.png and metadata.json
+                will be written here.
+            reference_dir: Optional path to a reference folder (containing metadata.json
+                with averages and stddevs). If provided, the plot and metadata show
+                (data - ref) with ±1 stdev from the reference.
+
+        Returns:
+            Path to the target directory (containing plot.png and metadata.json).
+        """
+        target_dir = Path(target_dir)
+        csv_path = target_dir / "data.csv"
+        if not csv_path.exists():
+            raise FileNotFoundError(f"Target data not found: {csv_path}")
+
+        def _parse_float(s: str):
+            s = (s or "").strip()
+            if not s:
+                return None
+            try:
+                return float(s)
+            except ValueError:
+                return None
+
+        samples: list[Sample] = []
+        with open(csv_path, newline="") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                t = _parse_float(row.get("time_s", ""))
+                if t is None:
+                    continue
+                samples.append(Sample(
+                    timestamp=0.0,
+                    elapsed_s=t,
+                    cpu_usage_percent=_parse_float(row.get("cpu_usage_percent", "")) or 0.0,
+                    cpu_power_w=_parse_float(row.get("cpu_power_w", "")),
+                    gpu_power_w=_parse_float(row.get("gpu_power_w", "")),
+                    gpu_usage_percent=_parse_float(row.get("gpu_usage_percent", "")),
+                    gpu_memory_gb=_parse_float(row.get("gpu_memory_gb", "")),
+                    gpu_memory_percent=_parse_float(row.get("gpu_memory_percent", "")),
+                    ram_usage_percent=_parse_float(row.get("ram_usage_percent", "")) or 0.0,
+                    ram_used_gb=_parse_float(row.get("ram_used_gb", "")) or 0.0,
+                    ram_available_gb=_parse_float(row.get("ram_available_gb", "")) or 0.0,
+                ))
+
+        if not samples:
+            raise ValueError(f"No valid data rows in {csv_path}")
+
+        title = self.title
+        frequency_hz = self.frequency_hz
+        meta_path = target_dir / "metadata.json"
+        if meta_path.exists():
+            try:
+                with open(meta_path) as mf:
+                    meta = json.load(mf)
+                    if meta.get("title"):
+                        title = meta["title"]
+                    if meta.get("frequency_hz") is not None:
+                        frequency_hz = meta["frequency_hz"]
+            except (json.JSONDecodeError, OSError):
+                pass
+
+        ref_averages: Optional[dict] = None
+        ref_stddevs: Optional[dict] = None
+        if reference_dir is not None:
+            ref_dir = Path(reference_dir)
+            ref_meta_path = ref_dir / "metadata.json"
+            if ref_meta_path.exists():
+                try:
+                    with open(ref_meta_path) as mf:
+                        ref_meta = json.load(mf)
+                    raw = ref_meta.get("averages") or {}
+                    ref_averages = {k: v for k, v in raw.items() if not k.endswith("_stddev")}
+                    ref_stddevs = {
+                        k[:-7]: v for k, v in raw.items()
+                        if k.endswith("_stddev") and v is not None
+                    }
+                except (json.JSONDecodeError, OSError):
+                    pass
+
+        metrics_available = {
+            "cpu_power": any(s.cpu_power_w is not None for s in samples),
+            "gpu_power": any(s.gpu_power_w is not None for s in samples),
+            "gpu_usage": any(s.gpu_usage_percent is not None for s in samples),
+            "gpu_memory": any(s.gpu_memory_gb is not None for s in samples),
+        }
+
+        saved_run_dir = self._run_dir
+        saved_samples = self._samples
+        saved_title = self.title
+        saved_frequency_hz = self.frequency_hz
+        try:
+            self._run_dir = target_dir
+            self._samples = samples
+            self.title = title
+            self.frequency_hz = frequency_hz
+            averages = self._compute_averages()
+            stddevs = self._compute_stddevs(averages) if averages else {}
+            run_time_s = samples[-1].elapsed_s if samples else 0.0
+
+            self._write_metadata(
+                run_time_s=run_time_s,
+                num_frames=None,
+                energy_per_frame_min=None,
+                energy_per_frame_max=None,
+                energy_per_frame_avg=None,
+                sum_dt_sq=0.0,
+                metrics_available=metrics_available,
+                averages=averages,
+                stddevs=stddevs,
+                ref_averages=ref_averages,
+                ref_stddevs=ref_stddevs,
+                ref_energy_per_frame_j=None,
+            )
+            self._write_plot(
+                run_dir=target_dir,
+                samples=samples,
+                title_override=title,
+                ref_averages=ref_averages,
+                ref_stddevs=ref_stddevs,
+            )
+        finally:
+            self._run_dir = saved_run_dir
+            self._samples = saved_samples
+            self.title = saved_title
+            self.frequency_hz = saved_frequency_hz
+
+        return str(target_dir)
+
     def stop(self, num_frames: Optional[int] = None):
         """
         Stop recording and write all output files.
@@ -541,13 +685,20 @@ class Profiler:
         title_suffix: Optional[str] = None,
         averages: Optional[dict] = None,
         stddevs: Optional[dict] = None,
+        run_dir: Optional[Path] = None,
+        samples: Optional[list] = None,
+        title_override: Optional[str] = None,
     ):
         """Generate matplotlib PNG plot of all metrics. If ref_averages given, plot (data - ref). Fill = ±1 stdev."""
         import matplotlib
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
 
-        if not self._samples:
+        _run_dir = run_dir if run_dir is not None else self._run_dir
+        _samples = samples if samples is not None else self._samples
+        _title = title_override if title_override is not None else self.title
+
+        if not _samples:
             return
 
         averages = averages or {}
@@ -582,8 +733,8 @@ class Profiler:
                     hi.append(y + stddev)
             ax.fill_between(times, lo, hi, color=color, alpha=0.3)
 
-        times = [s.elapsed_s for s in self._samples]
-        title = self.title + (title_suffix or "")
+        times = [s.elapsed_s for s in _samples]
+        title = _title + (title_suffix or "")
 
         fig, axes = plt.subplots(3, 2, figsize=(12, 10))
         fig.suptitle(title, fontsize=14)
@@ -591,7 +742,7 @@ class Profiler:
         # CPU usage
         ax = axes[0, 0]
         color = "blue"
-        cpu_usage = [s.cpu_usage_percent for s in self._samples]
+        cpu_usage = [s.cpu_usage_percent for s in _samples]
         ys_cpu = _sub_ref(cpu_usage, "cpu_usage_percent")
         std = _fill_stddev("cpu_usage_percent")
         _add_fill(ax, times, ys_cpu, std, color, 0.0)
@@ -603,7 +754,7 @@ class Profiler:
         # CPU power
         ax = axes[1, 0]
         color = "green"
-        ys_cpup = _sub_ref([s.cpu_power_w for s in self._samples], "cpu_power_w")
+        ys_cpup = _sub_ref([s.cpu_power_w for s in _samples], "cpu_power_w")
         std = _fill_stddev("cpu_power_w")
         _add_fill(ax, times, ys_cpup, std, color, 0.0)
         ax.plot(times, ys_cpup, "-", color=color, label="CPU power (W)")
@@ -614,7 +765,7 @@ class Profiler:
         # GPU usage
         ax = axes[0, 1]
         color = "orange"
-        ys_gpu = _sub_ref([s.gpu_usage_percent for s in self._samples], "gpu_usage_percent")
+        ys_gpu = _sub_ref([s.gpu_usage_percent for s in _samples], "gpu_usage_percent")
         std = _fill_stddev("gpu_usage_percent")
         _add_fill(ax, times, ys_gpu, std, color, 0.0)
         ax.plot(times, ys_gpu, "-", color=color, label="GPU %")
@@ -625,7 +776,7 @@ class Profiler:
         # GPU power
         ax = axes[1, 1]
         color = "red"
-        ys_gpup = _sub_ref([s.gpu_power_w for s in self._samples], "gpu_power_w")
+        ys_gpup = _sub_ref([s.gpu_power_w for s in _samples], "gpu_power_w")
         std = _fill_stddev("gpu_power_w")
         _add_fill(ax, times, ys_gpup, std, color, 0.0)
         ax.plot(times, ys_gpup, "-", color=color, label="GPU power (W)")
@@ -636,7 +787,7 @@ class Profiler:
         # GPU memory
         ax = axes[2, 1]
         color = "purple"
-        ys_gmem = _sub_ref([s.gpu_memory_gb for s in self._samples], "gpu_memory_gb")
+        ys_gmem = _sub_ref([s.gpu_memory_gb for s in _samples], "gpu_memory_gb")
         std = _fill_stddev("gpu_memory_gb")
         _add_fill(ax, times, ys_gmem, std, color, 0.0)
         ax.plot(times, ys_gmem, "-", color=color, label="GPU memory (GB)")
@@ -647,7 +798,7 @@ class Profiler:
         # RAM
         ax = axes[2, 0]
         color = "brown"
-        ram_usage = [s.ram_usage_percent for s in self._samples]
+        ram_usage = [s.ram_usage_percent for s in _samples]
         ys_ram = _sub_ref(ram_usage, "ram_usage_percent")
         std = _fill_stddev("ram_usage_percent")
         _add_fill(ax, times, ys_ram, std, color, 0.0)
@@ -665,9 +816,9 @@ class Profiler:
         # Apply y-axis upper limits: % metrics capped at 100, power/memory from config/system
         _ylim_tops = {
             axes[0, 0]: 100.0,                          # CPU usage (%)
-            axes[1, 0]: 100.0,                          # GPU usage (%)
+            axes[1, 0]: self.cpu_power_max_w,           # CPU power (W)
             axes[2, 0]: 100.0,                          # RAM usage (%)
-            axes[0, 1]: self.cpu_power_max_w,           # CPU power (W)
+            axes[0, 1]: 100.0,                          # GPU power (%)
             axes[1, 1]: self.gpu_power_max_w,           # GPU power (W)
             axes[2, 1]: self._gpu_memory_total_gb,      # GPU memory (GB)
         }
@@ -681,7 +832,7 @@ class Profiler:
             top = _ylim_tops.get(ax)
             if top is not None:
                 ax.set_ylim(0, top)
-        png_path = self._run_dir / "plot.png"
+        png_path = _run_dir / "plot.png"
         plt.savefig(png_path, dpi=150)
         plt.close()
     

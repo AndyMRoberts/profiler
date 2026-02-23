@@ -56,7 +56,7 @@ class TestProfilerInit:
     def test_init_basic(self):
         """Profiler initializes with output directory, frequency, title."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            p = Profiler(tmpdir, frequency_hz=2.0, title="Test run")
+            p = Profiler(tmpdir, gpu_memory_total_gb=16.376, frequency_hz=2.0, title="Test run")
             assert p.output_directory == Path(tmpdir)
             assert p.frequency_hz == 2.0
             assert p.title == "Test run"
@@ -72,7 +72,7 @@ class TestProfilerStartStop:
         except ProfilerSetupError:
             # Setup fails - create profiler and verify start() raises
             with tempfile.TemporaryDirectory() as tmpdir:
-                p = Profiler(tmpdir)
+                p = Profiler(tmpdir, gpu_memory_total_gb=16.376)
                 with pytest.raises(ProfilerSetupError):
                     p.start()
             return
@@ -93,7 +93,7 @@ class TestProfilerStartStop:
         """Start then stop produces CSV and metadata files in run subdirectory."""
         _require_full_setup()
         with tempfile.TemporaryDirectory() as tmpdir:
-            p = Profiler(tmpdir, frequency_hz=4.0, title="Unit test")
+            p = Profiler(tmpdir, gpu_memory_total_gb=16.376, frequency_hz=4.0, title="Unit test")
             p.start()
             time.sleep(0.8)  # Allow a few samples at 4 Hz
             p.stop()
@@ -104,7 +104,7 @@ class TestProfilerStartStop:
         """Start then stop produces PNG plot in run subdirectory."""
         _require_full_setup()
         with tempfile.TemporaryDirectory() as tmpdir:
-            p = Profiler(tmpdir, frequency_hz=4.0)
+            p = Profiler(tmpdir, gpu_memory_total_gb=16.376, frequency_hz=4.0)
             p.start()
             time.sleep(0.6)
             p.stop()
@@ -114,7 +114,7 @@ class TestProfilerStartStop:
         """CSV contains expected column headers."""
         _require_full_setup()
         with tempfile.TemporaryDirectory() as tmpdir:
-            p = Profiler(tmpdir, frequency_hz=4.0)
+            p = Profiler(tmpdir, gpu_memory_total_gb=16.376, frequency_hz=4.0)
             p.start()
             time.sleep(0.5)
             p.stop()
@@ -132,7 +132,7 @@ class TestProfilerStartStop:
         """Metadata JSON contains title, run_time_s, num_samples, frequency_hz."""
         _require_full_setup()
         with tempfile.TemporaryDirectory() as tmpdir:
-            p = Profiler(tmpdir, frequency_hz=4.0, title="My test")
+            p = Profiler(tmpdir, gpu_memory_total_gb=16.376, frequency_hz=4.0, title="My test")
             p.start()
             time.sleep(0.5)
             p.stop()
@@ -147,7 +147,7 @@ class TestProfilerStartStop:
         """stop(num_frames=N) adds energy_per_frame_j to metadata."""
         _require_full_setup()
         with tempfile.TemporaryDirectory() as tmpdir:
-            p = Profiler(tmpdir, frequency_hz=4.0)
+            p = Profiler(tmpdir, gpu_memory_total_gb=16.376, frequency_hz=4.0)
             p.start()
             time.sleep(0.6)
             p.stop(num_frames=10)
@@ -162,7 +162,7 @@ class TestProfilerStartStop:
         """energy_per_frame_j values must not all be 0 when num_frames given - indicates power data failure."""
         _require_full_setup()
         with tempfile.TemporaryDirectory() as tmpdir:
-            p = Profiler(tmpdir, frequency_hz=4.0)
+            p = Profiler(tmpdir, gpu_memory_total_gb=16.376, frequency_hz=4.0)
             p.start()
             time.sleep(0.8)
             p.stop(num_frames=10)
@@ -180,7 +180,7 @@ class TestProfilerStartStop:
         """stop() without num_frames does not add energy_per_frame_j."""
         _require_full_setup()
         with tempfile.TemporaryDirectory() as tmpdir:
-            p = Profiler(tmpdir)
+            p = Profiler(tmpdir, gpu_memory_total_gb=16.376)
             p.start()
             time.sleep(0.3)
             p.stop()
@@ -193,7 +193,7 @@ class TestProfilerStartStop:
         """Calling stop() twice does not raise."""
         _require_full_setup()
         with tempfile.TemporaryDirectory() as tmpdir:
-            p = Profiler(tmpdir)
+            p = Profiler(tmpdir, gpu_memory_total_gb=16.376)
             p.start()
             time.sleep(0.3)
             p.stop()
@@ -203,7 +203,7 @@ class TestProfilerStartStop:
         """Calling start() twice (without stop) is effectively a no-op for second start."""
         _require_full_setup()
         with tempfile.TemporaryDirectory() as tmpdir:
-            p = Profiler(tmpdir)
+            p = Profiler(tmpdir, gpu_memory_total_gb=16.376)
             p.start()
             p.start()  # Second start should not raise
             time.sleep(0.3)
@@ -213,7 +213,7 @@ class TestProfilerStartStop:
         """Run directory is named {YYYY}_{MM}_{DD}_{HHMM}_{title_with_underscores}."""
         _require_full_setup()
         with tempfile.TemporaryDirectory() as tmpdir:
-            p = Profiler(tmpdir, title="SLAM inference test")
+            p = Profiler(tmpdir, gpu_memory_total_gb=16.376, title="SLAM inference test")
             p.start()
             time.sleep(0.3)
             p.stop()
@@ -230,7 +230,7 @@ class TestProfilerDataQuality:
         """cpu_usage_percent and ram_* must have values in every data row (psutil always works)."""
         _require_full_setup()
         with tempfile.TemporaryDirectory() as tmpdir:
-            p = Profiler(tmpdir, frequency_hz=4.0)
+            p = Profiler(tmpdir, gpu_memory_total_gb=16.376, frequency_hz=4.0)
             p.start()
             time.sleep(0.8)
             p.stop()
@@ -246,7 +246,7 @@ class TestProfilerDataQuality:
         """GPU columns must have data. Fails if no GPU, NVML permissions, or nvidia-ml-py not working."""
         _require_full_setup()
         with tempfile.TemporaryDirectory() as tmpdir:
-            p = Profiler(tmpdir, frequency_hz=4.0)
+            p = Profiler(tmpdir, gpu_memory_total_gb=16.376, frequency_hz=4.0)
             p.start()
             time.sleep(0.8)
             p.stop()
@@ -273,7 +273,7 @@ class TestProfilerDataQuality:
         """cpu_power_w must have data. Fails if RAPL not accessible (permissions) or pyJoules not working."""
         _require_full_setup()
         with tempfile.TemporaryDirectory() as tmpdir:
-            p = Profiler(tmpdir, frequency_hz=4.0)
+            p = Profiler(tmpdir, gpu_memory_total_gb=16.376, frequency_hz=4.0)
             p.start()
             time.sleep(0.8)
             p.stop()
@@ -289,7 +289,7 @@ class TestProfilerDataQuality:
         """Metadata includes metrics_available for diagnostics."""
         _require_full_setup()
         with tempfile.TemporaryDirectory() as tmpdir:
-            p = Profiler(tmpdir)
+            p = Profiler(tmpdir, gpu_memory_total_gb=16.376)
             p.start()
             time.sleep(0.5)
             p.stop()
@@ -303,7 +303,7 @@ class TestProfilerDataQuality:
         """Metadata averages block includes key_stddev for each metric (run stdev when no reference)."""
         _require_full_setup()
         with tempfile.TemporaryDirectory() as tmpdir:
-            p = Profiler(tmpdir, frequency_hz=4.0)
+            p = Profiler(tmpdir, gpu_memory_total_gb=16.376, frequency_hz=4.0)
             p.start()
             time.sleep(0.8)  # enough samples for non-zero stddev possibility
             p.stop()
@@ -329,7 +329,7 @@ class TestProfilerDataQuality:
         """Reference run metadata includes averages with _stddev for each metric."""
         _require_full_setup()
         with tempfile.TemporaryDirectory() as tmpdir:
-            p = Profiler(tmpdir, frequency_hz=4.0, title="Ref test")
+            p = Profiler(tmpdir, gpu_memory_total_gb=16.376, frequency_hz=4.0, title="Ref test")
             p.record_reference(2)  # 2 seconds of reference
             ref_meta_path = Path(tmpdir) / "reference" / "metadata.json"
             assert ref_meta_path.exists(), "reference metadata.json missing"
@@ -347,7 +347,7 @@ class TestProfilerDataQuality:
         """When use_reference=True, averages_reference_adjusted includes _stddev (from reference)."""
         _require_full_setup()
         with tempfile.TemporaryDirectory() as tmpdir:
-            p = Profiler(tmpdir, frequency_hz=4.0, title="Adjusted test")
+            p = Profiler(tmpdir, gpu_memory_total_gb=16.376, frequency_hz=4.0, title="Adjusted test")
             p.record_reference(2)
             p.start(use_reference=True)
             time.sleep(0.6)
