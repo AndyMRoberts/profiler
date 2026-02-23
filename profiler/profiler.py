@@ -395,8 +395,9 @@ class Profiler:
     ) -> str:
         """
         Regenerate plot.png and metadata.json in a target run directory from its
-        data.csv, using optional reference metadata for reference-adjusted plots
-        and summary statistics.
+        data.csv, using reference metadata for reference-adjusted plots and summary
+        statistics. The plot always uses reference-adjusted values (data - ref) and
+        reference stddevs for the ±1 stdev fill when a reference is found.
 
         Use this to apply updated plot styling to legacy data, or to compare
         the same run against different references by passing different reference_dir.
@@ -407,14 +408,19 @@ class Profiler:
             target_dir: Path to the run directory containing data.csv (and optionally
                 metadata.json for title/frequency_hz). plot.png and metadata.json
                 will be written here.
-            reference_dir: Optional path to a reference folder (containing metadata.json
-                with averages and stddevs). If provided, the plot and metadata show
-                (data - ref) with ±1 stdev from the reference.
+            reference_dir: Path to a reference folder (metadata.json with averages and
+                stddevs). If None, defaults to the "reference" folder in the same
+                parent directory as target_dir (e.g. runs/reference for target
+                runs/2026_02_23_1619_SLAM_inference_test). Plot shows (data - ref)
+                with ±1 stdev from the reference.
 
         Returns:
             Path to the target directory (containing plot.png and metadata.json).
         """
         target_dir = Path(target_dir)
+        # Default reference to "reference" folder in same parent as target (e.g. runs/reference)
+        if reference_dir is None:
+            reference_dir = target_dir.parent / "reference"
         csv_path = target_dir / "data.csv"
         if not csv_path.exists():
             raise FileNotFoundError(f"Target data not found: {csv_path}")
@@ -470,22 +476,21 @@ class Profiler:
         ref_averages: Optional[dict] = None
         ref_stddevs: Optional[dict] = None
         ref_energy_per_frame_j: Optional[dict] = None
-        if reference_dir is not None:
-            ref_dir = Path(reference_dir)
-            ref_meta_path = ref_dir / "metadata.json"
-            if ref_meta_path.exists():
-                try:
-                    with open(ref_meta_path) as mf:
-                        ref_meta = json.load(mf)
-                    raw = ref_meta.get("averages") or {}
-                    ref_averages = {k: v for k, v in raw.items() if not k.endswith("_stddev")}
-                    ref_stddevs = {
-                        k[:-7]: v for k, v in raw.items()
-                        if k.endswith("_stddev") and v is not None
-                    }
-                    ref_energy_per_frame_j = ref_meta.get("energy_per_frame_j")
-                except (json.JSONDecodeError, OSError):
-                    pass
+        ref_dir = Path(reference_dir)
+        ref_meta_path = ref_dir / "metadata.json"
+        if ref_meta_path.exists():
+            try:
+                with open(ref_meta_path) as mf:
+                    ref_meta = json.load(mf)
+                raw = ref_meta.get("averages") or {}
+                ref_averages = {k: v for k, v in raw.items() if not k.endswith("_stddev")}
+                ref_stddevs = {
+                    k[:-7]: v for k, v in raw.items()
+                    if k.endswith("_stddev") and v is not None
+                }
+                ref_energy_per_frame_j = ref_meta.get("energy_per_frame_j")
+            except (json.JSONDecodeError, OSError):
+                pass
 
         metrics_available = {
             "cpu_power": any(s.cpu_power_w is not None for s in samples),
@@ -558,6 +563,7 @@ class Profiler:
                 title_override=title,
                 ref_averages=ref_averages,
                 ref_stddevs=ref_stddevs,
+                title_suffix=" (reference adjusted)" if ref_averages else None,
                 averages=averages,
                 stddevs=stddevs,
             )
@@ -743,8 +749,8 @@ class Profiler:
 
         def _fill_stddev(key: str):
             """Stdev for plot fill: use reference stdev when reference data exists, else run stdev."""
-            if ref_averages and ref_stddevs and key in ref_stddevs and ref_stddevs[key] is not None:
-                return ref_stddevs[key] or 0.0
+            if ref_averages and ref_stddevs:
+                return ref_stddevs.get(key) or 0.0
             return (stddevs.get(key) or 0.0)
 
         def _sub_ref(vals: list, key: str):
@@ -906,12 +912,12 @@ class Profiler:
             "metrics_available": metrics_available or {},
         }
         if averages:
-            # Each key followed by key_stddev: ref stdev when reference exists, else run stdev.
+            # Averages and their stddevs are always from the run's data (data.csv), not the reference,
+            # so they do not change when reprocessing with a different reference.
             meta["averages"] = {}
-            stdev_source = (ref_stddevs or {}) if ref_averages else (stddevs or {})
             for k in averages:
                 meta["averages"][k] = _round_val(averages[k])
-                meta["averages"][k + "_stddev"] = _round_val(stdev_source.get(k))
+                meta["averages"][k + "_stddev"] = _round_val((stddevs or {}).get(k))
         if num_frames is not None:
             meta["num_frames"] = num_frames
             if energy_per_frame_avg is not None:
