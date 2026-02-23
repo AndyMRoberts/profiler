@@ -13,8 +13,8 @@ output_dir = f'{os.path.dirname(os.path.abspath(__file__))}/runs'
 p = Profiler(output_dir, 
             frequency_hz=2.0, 
             title="SLAM inference test",
-            cpu_power_max_w=150.0, 
-            gpu_power_max_w=300.0,
+            cpu_power_max_w=200.0, 
+            gpu_power_max_w=200.0,
             gpu_memory_total_gb=16.376)
 
 print(f'Data will be saved to output directory: {output_dir}')
