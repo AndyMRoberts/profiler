@@ -601,7 +601,7 @@ class Profiler:
         ax.grid(True, alpha=0.3)
 
         # CPU power
-        ax = axes[0, 1]
+        ax = axes[1, 0]
         color = "green"
         ys_cpup = _sub_ref([s.cpu_power_w for s in self._samples], "cpu_power_w")
         std = _fill_stddev("cpu_power_w")
@@ -612,7 +612,7 @@ class Profiler:
         ax.grid(True, alpha=0.3)
 
         # GPU usage
-        ax = axes[1, 0]
+        ax = axes[0, 1]
         color = "orange"
         ys_gpu = _sub_ref([s.gpu_usage_percent for s in self._samples], "gpu_usage_percent")
         std = _fill_stddev("gpu_usage_percent")
