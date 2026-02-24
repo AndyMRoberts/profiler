@@ -362,3 +362,80 @@ class TestProfilerDataQuality:
                 assert stddev_key in adj, f"averages_reference_adjusted missing {stddev_key}"
                 val = adj[stddev_key]
                 assert val is None or (isinstance(val, (int, float)) and val >= 0)
+
+
+class TestRefMetadataCopy:
+    """Tests that ref_metadata.json is created/versioned correctly."""
+
+    def test_stop_copies_ref_metadata_to_run_dir(self):
+        """stop() copies reference metadata.json to run_dir/ref_metadata.json when reference exists."""
+        _require_full_setup()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            p = Profiler(tmpdir, gpu_memory_total_gb=16.376, frequency_hz=4.0, title="Ref copy test")
+            p.record_reference(2)
+            p.start()
+            time.sleep(0.4)
+            p.stop()
+            assert (p._run_dir / "ref_metadata.json").exists(), "ref_metadata.json not created in run dir"
+            with open(p._run_dir / "ref_metadata.json") as f:
+                ref_meta = json.load(f)
+            assert "averages" in ref_meta
+
+    def test_record_reference_does_not_create_ref_metadata(self):
+        """record_reference() itself must NOT create a ref_metadata.json in the reference dir."""
+        _require_full_setup()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            p = Profiler(tmpdir, gpu_memory_total_gb=16.376, frequency_hz=4.0)
+            p.record_reference(2)
+            ref_dir = Path(tmpdir) / "reference"
+            assert not (ref_dir / "ref_metadata.json").exists(), (
+                "ref_metadata.json should not be created inside the reference directory itself"
+            )
+
+    def test_stop_no_ref_metadata_when_no_reference_folder(self):
+        """stop() does NOT create ref_metadata.json when no reference folder exists."""
+        _require_full_setup()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            p = Profiler(tmpdir, gpu_memory_total_gb=16.376, frequency_hz=4.0)
+            p.start()
+            time.sleep(0.4)
+            p.stop()
+            assert not (p._run_dir / "ref_metadata.json").exists(), (
+                "ref_metadata.json should not be created when no reference folder exists"
+            )
+
+    def test_reprocess_data_creates_ref_metadata(self):
+        """reprocess_data() copies reference metadata.json to target_dir/ref_metadata.json."""
+        _require_full_setup()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            p = Profiler(tmpdir, gpu_memory_total_gb=16.376, frequency_hz=4.0, title="Reprocess test")
+            p.record_reference(2)
+            p.start()
+            time.sleep(0.4)
+            p.stop()
+            run_dir = p._run_dir
+            # Remove the ref_metadata.json created by stop() so we can test reprocess independently
+            ref_meta_in_run = run_dir / "ref_metadata.json"
+            if ref_meta_in_run.exists():
+                ref_meta_in_run.unlink()
+            p.reprocess_data(run_dir)
+            assert (run_dir / "ref_metadata.json").exists(), "ref_metadata.json not created by reprocess_data"
+
+    def test_reprocess_data_versions_ref_metadata(self):
+        """reprocess_data() adds versioned ref_metadata_1.json, _2.json when called multiple times."""
+        _require_full_setup()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            p = Profiler(tmpdir, gpu_memory_total_gb=16.376, frequency_hz=4.0, title="Version test")
+            p.record_reference(2)
+            p.start()
+            time.sleep(0.4)
+            p.stop()
+            run_dir = p._run_dir
+            # ref_metadata.json should already exist from stop()
+            assert (run_dir / "ref_metadata.json").exists()
+            # First reprocess: should create ref_metadata_1.json
+            p.reprocess_data(run_dir)
+            assert (run_dir / "ref_metadata_1.json").exists(), "ref_metadata_1.json not created on second copy"
+            # Second reprocess: should create ref_metadata_2.json
+            p.reprocess_data(run_dir)
+            assert (run_dir / "ref_metadata_2.json").exists(), "ref_metadata_2.json not created on third copy"

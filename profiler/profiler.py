@@ -6,6 +6,7 @@ Outputs: CSV data, PNG plot, and metadata JSON.
 import csv
 import json
 import re
+import shutil
 import threading
 import time
 from datetime import datetime
@@ -492,6 +493,20 @@ class Profiler:
             except (json.JSONDecodeError, OSError):
                 pass
 
+            # Copy reference metadata to target_dir to preserve a record of the reference used.
+            # If ref_metadata.json already exists (from original recording or prior reprocess),
+            # add versioned copies: ref_metadata_1.json, ref_metadata_2.json, etc.
+            dest = target_dir / "ref_metadata.json"
+            if dest.exists():
+                i = 1
+                while (target_dir / f"ref_metadata_{i}.json").exists():
+                    i += 1
+                dest = target_dir / f"ref_metadata_{i}.json"
+            try:
+                shutil.copy2(ref_meta_path, dest)
+            except OSError:
+                pass
+
         metrics_available = {
             "cpu_power": any(s.cpu_power_w is not None for s in samples),
             "gpu_power": any(s.gpu_power_w is not None for s in samples),
@@ -695,6 +710,18 @@ class Profiler:
             ref_energy_per_frame_j=ref_energy_per_frame_j,
         )
         self._output_written = True
+
+        # Copy reference metadata to the run directory (for non-reference recordings only),
+        # so there is a permanent record of the reference data used even if the reference
+        # folder is later overwritten.
+        if self._run_dir_override is None:
+            ref_dir_to_check = self._ref_dir if self._ref_dir is not None else (self.output_directory / "reference")
+            ref_meta_src = ref_dir_to_check / "metadata.json"
+            if ref_meta_src.exists():
+                try:
+                    shutil.copy2(ref_meta_src, self._run_dir / "ref_metadata.json")
+                except OSError:
+                    pass
 
     def _write_csv(self):
         """Write sampled metrics to CSV."""
